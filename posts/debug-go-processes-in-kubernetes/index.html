@@ -1,0 +1,189 @@
+<!doctype html><html lang=en-us>
+<head>
+<title>Debug Go Processes in Kubernetes | blog.sseif.dev</title>
+<meta charset=utf-8>
+<meta http-equiv=x-ua-compatible content="IE=edge,chrome=1">
+<meta name=viewport content="width=device-width,minimum-scale=1">
+<meta name=description content="Sample article showcasing basic Markdown syntax and formatting for HTML elements.">
+<meta name=generator content="Hugo 0.91.0">
+<meta name=ROBOTS content="NOINDEX, NOFOLLOW">
+<link rel=stylesheet href=/css/style.css>
+<link rel="shortcut icon" href=/images/favicon.ico type=image/x-icon>
+</head>
+<body>
+<nav class=navigation>
+<a href=/> <span class=arrow>←</span>Home</a>
+<a href=/posts>Archive</a>
+<a href=/tags>Tags</a>
+<a href=/about>About</a>
+</nav>
+<main class=main>
+<section id=single>
+<h1 class=title>Debug Go Processes in Kubernetes</h1>
+<div class=tip>
+<time datetime="2021-12-22 00:00:00 +0000 UTC">Dec 22, 2021</time>
+<span class=split>
+·
+</span>
+<span>
+1052 words
+</span>
+<span class=split>
+·
+</span>
+<span>
+5 minute read
+</span>
+</div>
+<div class=content>
+<p>This post describes a procedure to attach the <a href=https://github.com/go-delve/delve target=_blank rel=noopener>Delve</a> debugger to a Go application running in a Kubernetes pod and connect the debugger with your local development environment.</p>
+<p>The procedure uses Kubernetes' <a href=https://kubernetes.io/docs/concepts/workloads/pods/ephemeral-containers/ target=_blank rel=noopener>Ephemeral Containers</a> to launch the debugger.
+This comes with the advantage that the container image of the debug target, i.e. the Go application, does not need to bring a rich user land (bash, delve, netcat, etc.).
+Instead, this approach works even when the target image is <a href=https://github.com/GoogleContainerTools/distroless target=_blank rel=noopener>distroless</a> or built <code>FROM SCRATCH</code> (see <a href=https://chemidy.medium.com/create-the-smallest-and-secured-golang-docker-image-based-on-scratch-4752223b7324 target=_blank rel=noopener>Create the smallest and secured golang docker image based on scratch</a>).
+The second feature of this approach is that the debugger is exposed to your local machine via network plumbing and pipes.
+It is therefore possible to connect your local development environment, for example GoLand, to the process running in Kubernetes.
+The approach is illustrated in the figure below.</p>
+<p><p class=markdown-image>
+<img src=/images/delve-kubernetes/setup.png alt="debug setup" title="Debug Setup">
+</p></p>
+<h1 id=tldr>tl;dr <a href=#tldr class=anchor>🔗</a></h1><div class=highlight><pre tabindex=0 style=background-color:#f8f8f8;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-bash data-lang=bash>EXPORT <span style=color:#b8860b>DEBUGGER_IMAGE</span><span style=color:#666>=</span>my-debug-toolkit
+EXPORT <span style=color:#b8860b>TARGET_POD</span><span style=color:#666>=</span>my-pod
+EXPORT <span style=color:#b8860b>TARGET_CONTAINER</span><span style=color:#666>=</span>app-container
+
+kubectl debug --image<span style=color:#666>=</span><span style=color:#b8860b>$DEBUGGER_IMAGE</span> -c debugger <span style=color:#b8860b>$TARGET_POD</span> --target<span style=color:#666>=</span><span style=color:#b8860b>$TARGET_CONTAINER</span> -- dlv attach <span style=color:#666>1</span> --listen<span style=color:#666>=</span>:2345 --headless<span style=color:#666>=</span><span style=color:#a2f>true</span> --api-version<span style=color:#666>=</span><span style=color:#666>2</span> --accept-multiclient --continue
+
+tcpserver 127.0.0.1 <span style=color:#666>2345</span> kubectl <span style=color:#a2f>exec</span> -i -c debugger <span style=color:#b8860b>$TARGET_POD</span> -- nc 127.0.0.1 <span style=color:#666>2345</span> &amp;
+
+dlv connect 127.0.0.1:2345
+</code></pre></div><h1 id=requirements>Requirements <a href=#requirements class=anchor>🔗</a></h1><p>Ephemeral Containers are a still relatively new feature in Kubernetes.
+The feature is included since version <a href=https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/ target=_blank rel=noopener>1.16 in Alpha stage</a>.
+Alpha stage features are disabled by default and need to be enabled explicitly (start the API server with <code>--feature-gates=EphemeralContainers=true</code>).
+With the release of Kubernetes 1.23, the feature reached Beta stage and is therefore enabled by default.</p>
+<p>Another minor complication is that this approach requires a shared PID namespace between the ephemeral container and the target container.
+It is generally possible to <a href=https://kubernetes.io/docs/tasks/configure-pod-container/share-process-namespace/ target=_blank rel=noopener>share the PID namespace in pods</a>.
+Ephemeral containers allow to target the namespaces of a specific container.
+However, the <code>--target</code> parameter must be <a href=https://kubernetes.io/docs/tasks/debug-application-cluster/debug-running-pod/#ephemeral-container target=_blank rel=noopener>supported by the Container Runtime</a>.
+For <a href=https://github.com/cri-o/cri-o target=_blank rel=noopener>CRI-O</a>, full support just landed with the <a href=https://github.com/cri-o/cri-o/releases/tag/v1.23.0 target=_blank rel=noopener>1.23 release</a>.</p>
+<h1 id=debug-image>Debug image <a href=#debug-image class=anchor>🔗</a></h1><div class=highlight><pre tabindex=0 style=background-color:#f8f8f8;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-Docker data-lang=Docker><span style=color:#a2f;font-weight:700>FROM</span><span style=color:#b44> registry.access.redhat.com/ubi8/ubi</span><span>
+</span><span></span><span style=color:#a2f;font-weight:700>RUN</span> dnf install -y delve nc<span>
+</span><span></span><span style=color:#a2f;font-weight:700>ENTRYPOINT</span> /bin/bash<span>
+</span></code></pre></div><p>The image for the debug container needs to contain Delve, the actual debugger, and netcat (nc).
+There are no other requirements to this image.
+If you want to include other tools as well or replace the base image, feel free to do so.
+Build and push the image to your registry.</p>
+<h1 id=ephemeral-debug-container>Ephemeral Debug Container <a href=#ephemeral-debug-container class=anchor>🔗</a></h1><p><code>kubectl debug</code> creates an ephemeral container in the pod running the debug target.
+The ephemeral container runs a headless delve debug server that attaches to the Go process in the target container.
+The debug server listens on a local TCP port.</p>
+<p><code>kubectl debug --image=k8s-0:443/delve -c debugger demo-app --target=app -- dlv attach 1 --listen=:2345 --headless=true --api-version=2 --accept-multiclient --continue</code></p>
+<p>Breakdown of the command arguments and parameters:</p>
+<table>
+<thead>
+<tr>
+<th>Argument/Parameter</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--image=k8s-0:443/delve</code></td>
+<td>Name of our debug image (the one built in the step before).</td>
+</tr>
+<tr>
+<td><code>-c debugger</code></td>
+<td>Name of the debug container. This name cannot be re-used during the lifetime of a pod. In other words, you have to use a new name if you start a second instance of this debug container (including restarts).</td>
+</tr>
+<tr>
+<td><code>demo-app</code></td>
+<td>Name of the target pod.</td>
+</tr>
+<tr>
+<td><code>--target=app</code></td>
+<td>Name of the target application container.</td>
+</tr>
+<tr>
+<td><code>-- dlv attach 1</code></td>
+<td>Attach the debugger the running process with PID 1. If there are multiple processes in the application container the target PID might be different.</td>
+</tr>
+<tr>
+<td><code>--listen=:2345</code></td>
+<td>Listen locally on port 2345. No other container in the pod must claim this port.</td>
+</tr>
+<tr>
+<td><code>--headless=true</code></td>
+<td>Run debug server only, in headless mode.</td>
+</tr>
+<tr>
+<td><code>--api-version=2</code></td>
+<td>Delve API version when headless. New clients should use v2.</td>
+</tr>
+<tr>
+<td><code>--accept-multiclient</code></td>
+<td>Allows a headless server to accept multiple client connections.</td>
+</tr>
+<tr>
+<td><code>--continue</code></td>
+<td>Don&rsquo;t stop the execution of the process right after attaching. If the process' execution is suspended, we might trigger liveness probe failures.</td>
+</tr>
+</tbody>
+</table>
+<h1 id=plumbing>Plumbing <a href=#plumbing class=anchor>🔗</a></h1><p>Accessing this port from the outside is now slightly trickier than accessing ports of regular containers.
+The API for ephemeral containers does not allow ports.
+Therefore, one cannot just declare an ad-hoc service that exposes the debug server.
+An ugly work-around is to declare the port in a regular container and just bind to it from the ephemeral container (it is a shared network namespace after all).</p>
+<p>Instead, this procedure will take a different path.
+On the developer machine, we will start a <code>tcpserver</code> process (install from <code>ucspi-tcp</code> package).
+<code>tcpserver</code> waits for connections from TCP clients.
+For each connection, <code>tcpserver</code> spawns a subprocess and pipes the subprocess' stdin/stdout to the network connection.
+We will use <code>kubectl exec</code> as this subprocess.</p>
+<p>So far we have the following:</p>
+<div class=highlight><pre tabindex=0 style=background-color:#f8f8f8;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-fallback data-lang=fallback>tcpserver &lt;--stdin/stdout--&gt; kubectl
+</code></pre></div><p>When run in interactive mode, <code>kubectl exec</code> will forward the remote process' stdin/stdout.
+The remote process started by <code>kubectl exec</code> will be <code>netcat</code>.</p>
+<p>Adding <code>netcat</code> gives us:</p>
+<div class=highlight><pre tabindex=0 style=background-color:#f8f8f8;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-fallback data-lang=fallback>tcpserver &lt;--stdin/stdout--&gt; kubectl &lt;--stdin/stdout (tunneled)--&gt; netcat
+</code></pre></div><p><code>netcat</code> running in the debug container will then connect to the (pod) local Delve debug server and forward this TCP connection to stdin/stdout.</p>
+<p>This leaves us with the final plumbing:</p>
+<div class=highlight><pre tabindex=0 style=background-color:#f8f8f8;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-fallback data-lang=fallback>tcpserver &lt;--stdin/stdout--&gt; kubectl &lt;--stdin/stdout (tunneled)--&gt; netcat &lt;--TCP--&gt; dlv
+</code></pre></div><p>Effectively, the connection between tcpserver (developer machine) and Delve debug server (debug container) is tunneled through kubectl and the Kubernetes API server.</p>
+<p>The command to set this up is:</p>
+<p><code>tcpserver 127.0.0.1 2345 kubectl exec -i -c debugger demo-app -- nc 127.0.0.1 2345</code></p>
+<p>The command consists of three segments that correspond to the three different processes that are started.</p>
+<p><code>tcpserver 127.0.0.1 2345</code>: locally (developer machine) bind to port 2345.
+The debug client (IDE) will later connect to this port to initiate a debug session.</p>
+<p><code>kubectl exec -i -c debugger demo-app --</code>: the program that is run when a connection to tcpserver is established.
+tcpserver pipes stdin and stdout of that process to the network connection.
+The program, <code>kubectl exec</code>, runs a command in interactive mode inside the container <code>-c debugger</code> of the <code>demo-app</code> pod.
+Interactive mode means stdin/stdout are forwarded.</p>
+<p><code>-- nc 127.0.0.1 2345</code>: the command executed in the target container.
+netcat connects to the local tcp port 2345 and forwards that connection to stdin/stdout.
+The port must match the <code>--listen=:2345</code> parameter of the debug server.</p>
+<h1 id=debug-session>Debug Session <a href=#debug-session class=anchor>🔗</a></h1><p>At this point, the Delve debug server is exposed locally on port 2345.
+Delve can be started in client mode and connect to a server.</p>
+<p><code>dlv connect 127.0.0.1:2345</code></p>
+<p>Goland supports this particular setup as run configuration.
+<code>Add configuration...</code> &#187; <code>Go Remote</code></p>
+<p><p class=markdown-image>
+<img src=/images/delve-kubernetes/goland.png alt="GoLand Go Remote Run Configuration" title="GoLand Go Remote Run Configuration">
+</p></p>
+<h1 id=demo>Demo <a href=#demo class=anchor>🔗</a></h1><p><a href=https://asciinema.org/a/VSFFQqOFdBOl3viUyrrjPwBRJ target=_blank rel=noopener><p class=markdown-image>
+<img src=https://asciinema.org/a/VSFFQqOFdBOl3viUyrrjPwBRJ.svg alt=asciicast>
+</p></a></p>
+<h1 id=caveats>Caveats <a href=#caveats class=anchor>🔗</a></h1><ul>
+<li>Ephemeral containers resources are not accounted for.</li>
+<li>Stopping the execution on a breakpoint might cause liveness probes to fail.</li>
+<li>Every time the debug container is re-created (<code>kubectl debug</code>), a new name for it must be chosen.</li>
+</ul>
+</div>
+<div class=tags>
+<a href=https://simonseif.github.io/tags/go>go</a>
+<a href=https://simonseif.github.io/tags/kubernetes>kubernetes</a>
+</div>
+</section>
+</main>
+<footer id=footer>
+<div class=copyright>
+copyright 2021 blog.sseif.dev
+</div>
+</footer>
+</body>
+</html>
