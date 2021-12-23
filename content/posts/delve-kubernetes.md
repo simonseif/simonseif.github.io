@@ -13,6 +13,7 @@ categories = [
 ]
 series = ["Themes Guide"]
 aliases = ["migrate-from-jekyl"]
+draft = true
 +++
 
 This post describes a procedure to attach the [Delve](https://github.com/go-delve/delve) debugger to a Go application running in a Kubernetes pod and connect the debugger with your local development environment. 
